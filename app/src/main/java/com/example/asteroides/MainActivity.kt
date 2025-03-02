@@ -1,13 +1,17 @@
 package com.example.asteroides
 
 import android.content.Context
+import android.content.res.Configuration
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.os.AsyncTask
+import android.media.MediaPlayer
+import android.net.Uri
 import android.os.Bundle
-import android.os.SystemClock
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -16,15 +20,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.activity.compose.setContent
+import androidx.annotation.RawRes
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -35,7 +41,14 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.cos
@@ -48,20 +61,81 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            AsteroidesTest(modifier = Modifier.fillMaxSize())
+            AudioRecorder()
+//            AsteroidesTest(modifier = Modifier)
         }
     }
 }
 
+@Composable
+fun MediaRecorder() {
+
+}
+
+@Composable
+fun NativeVideoPlayer(@RawRes videoResId: Int) {
+    val context = LocalContext.current
+    val surfaceHolder = remember { mutableStateOf<SurfaceHolder?>(null) }
+    val mediaPlayer = remember { MediaPlayer() }
+
+    // Initialize MediaPlayer
+    LaunchedEffect(Unit) {
+        val videoUri = Uri.parse("android.resource://${context.packageName}/$videoResId")
+        mediaPlayer.setDataSource(context, videoUri)
+        mediaPlayer.setOnPreparedListener { it.start() }
+        mediaPlayer.setOnCompletionListener { it.seekTo(0) } // Restart on finish
+        mediaPlayer.prepareAsync()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            mediaPlayer.release() // Release resources when not needed
+        }
+    }
+
+    Row {
+        TextButton(
+            onClick = {
+                mediaPlayer.pause()
+            }
+        ) { Text("1", fontSize = 30.sp, color = Color.White) }
+        TextButton(
+            onClick = {
+                mediaPlayer.release()
+            }
+        ) { Text("2", fontSize = 30.sp, color = Color.White) }
+        TextButton(
+            onClick = {
+                mediaPlayer.stop()
+            }
+        ) { Text("3", fontSize = 30.sp, color = Color.White) }
+    }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            SurfaceView(ctx).apply {
+                holder.addCallback(object : SurfaceHolder.Callback {
+                    override fun surfaceCreated(holder: SurfaceHolder) {
+                        surfaceHolder.value = holder
+                        mediaPlayer.setDisplay(holder)
+                    }
+
+                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                    override fun surfaceDestroyed(holder: SurfaceHolder) {}
+                })
+            }
+        }
+    )
+}
+
 data class AsteroidData(val position: Offset)
-// Missile data class with movement logic
 data class Missile(val position: Offset, val velocity: Offset) {
     fun move(): Missile {
         return this.copy(position = position + velocity)
     }
 }
 
-// Calculate velocity based on direction from ship to touch position
 fun calculateVelocity(start: Offset, target: Offset, speed: Float): Offset {
     val direction = Offset(target.x - start.x, target.y - start.y)
     val magnitude = sqrt(direction.x.pow(2) + direction.y.pow(2)) // Calculate distance
@@ -72,81 +146,55 @@ fun calculateVelocity(start: Offset, target: Offset, speed: Float): Offset {
 @Composable
 fun AsteroidesTest(modifier: Modifier) {
     val context = LocalContext.current
-    val sensorManager = remember { context.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
-    val sensors = remember { sensorManager.getSensorList(Sensor.TYPE_ALL) }
-    val rotationSensor = remember { sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR) }
+
+    val configuration = LocalConfiguration.current
+    val isPortrait = remember(configuration) {
+        configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+    }
+
+    val mediaPlayer = remember { mutableStateOf(MediaPlayer.create(context, R.raw.full)) }
+    val shootingSound = remember { mutableStateOf(MediaPlayer.create(context, R.raw.shooting)) }
+    val mediaPosition = remember { mutableStateOf(mediaPlayer.value.currentPosition) }
+
     val rotation = remember { mutableFloatStateOf(0f) }
     var position = remember { mutableStateOf(Offset(541f, 1159f)) };
     var lastTouchedPosition = remember { mutableStateOf<Offset?>(null) };
 
     var missileList = remember { mutableStateOf<List<Missile>>(emptyList()) }
 
-    var azimuth = remember { mutableStateOf(0f) } // Yaw (Rotation around Z-axis)
-    var pitch = remember { mutableStateOf(0f) }   // Rotation around X-axis
-    var previousPitch = remember { mutableStateOf(0f) }   // Rotation around X-axis
-    var roll = remember { mutableStateOf(0f) }    // Rotation around Y-axis
-    var previousRoll = remember { mutableStateOf(0f) }    // Rotation around Y-axis
-
     LaunchedEffect(Unit) {
         while (true) {
             missileList.value = missileList.value.map { it.move() }
             rotation.value += 1f
-//            if (lastTouchedPosition.value != null) {
-//                position.value = lastTouchedPosition.value!!;
-//                lastTouchedPosition.value = null;
-//            }
-//            if (pitch.value != previousPitch.value) {
-//                if (pitch.value < 0) {
-//                    position.value = Offset(x = position.value.x, y = position.value.y - 1f)
-//                }
-//                if (pitch.value > 0) {
-//                    position.value = Offset(x = position.value.x, y = position.value.y + 1f)
-//                }
-//            }
-//
-//            if (roll.value != previousRoll.value) {
-//                if (roll.value < 0) {
-//                    position.value = Offset(x = position.value.x - 1f, y = position.value.y)
-//                }
-//
-//                if (roll.value > 0) {
-//                    position.value = Offset(x = position.value.x + 1f, y = position.value.y)
-//                }
-//            }
-//            previousRoll.value = roll.value
-//            previousPitch.value = pitch.value
-//
-//            position.value = position.value.copy(
-//                x = position.value.x + 1f,
-//                y = position.value.y + 1f
-//            )
             delay(16L)
         }
     }
 
-    DisposableEffect(Unit) {
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent?) {
-                event?.values?.let { values ->
-                    val rotationMatrix = FloatArray(9)
-                    val orientationValues = FloatArray(3)
+    LaunchedEffect(isPortrait) {
+        mediaPlayer.value.seekTo(mediaPosition.value)
+    }
 
-                    SensorManager.getRotationMatrixFromVector(rotationMatrix, values)
-                    SensorManager.getOrientation(rotationMatrix, orientationValues)
+    val lifecycleOwner = LocalLifecycleOwner.current
 
-                    azimuth.value = Math.toDegrees(orientationValues[0].toDouble()).toFloat()
-                    pitch.value = Math.toDegrees(orientationValues[1].toDouble()).toFloat()
-                    roll.value = Math.toDegrees(orientationValues[2].toDouble()).toFloat()
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    mediaPlayer.value.start()
                 }
+                Lifecycle.Event.ON_STOP -> {
+                    mediaPlayer.value.pause()
+                }
+                Lifecycle.Event.ON_DESTROY -> {
+                    mediaPlayer.value.stop()
+                }
+                else -> {}
             }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
-
-        sensorManager.registerListener(listener, rotationSensor, SensorManager.SENSOR_DELAY_UI)
+        lifecycleOwner.lifecycle.addObserver(observer)
 
         onDispose {
-            sensorManager.unregisterListener(listener)
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -157,8 +205,6 @@ fun AsteroidesTest(modifier: Modifier) {
             AsteroidData(Offset(800f, 1500f)),
             AsteroidData(Offset(300f, 2000f))
     )
-    // EjemploProgressDialog()
-    // CodeView()
 
     Canvas(
         modifier = Modifier
@@ -172,14 +218,17 @@ fun AsteroidesTest(modifier: Modifier) {
                             position.value = Offset(x = position.value.x, y = position.value.y - 1f)
                             true
                         }
+
                         Key.DirectionDown -> {
                             position.value = Offset(x = position.value.x, y = position.value.y + 1f)
                             true
                         }
+
                         Key.DirectionLeft -> {
                             position.value = Offset(x = position.value.x - 1f, y = position.value.y)
                             true
                         }
+
                         Key.DirectionRight -> {
                             position.value = Offset(x = position.value.x + 1f, y = position.value.y)
                             true
@@ -198,9 +247,8 @@ fun AsteroidesTest(modifier: Modifier) {
                             position = position.value,
                             velocity = calculateVelocity(position.value, p, speed = 10f)
                         )
+                        shootingSound.value.start();
                         missileList.value += missile
-
-                        // val touchPoints = event.changes.map { it.position }
                     }
                 }
             }
@@ -251,67 +299,5 @@ fun AsteroidesTest(modifier: Modifier) {
             color = Color.White,
             style = Stroke(width = 4f)
         )
-    }
-}
-
-fun factorial(valor: Int): Int {
-    var res = 1;
-    for (loop in 1..valor) {
-        res *= loop
-        SystemClock.sleep(1000)
-    }
-    return res
-}
-
-fun bloquearHiloPrincipal() {
-    val n = 1000;
-    val factorial = factorial(n)
-}
-
-fun crearHilo() {
-    val hilo = Thread {
-        println("Esto fue creado en otro hilo")
-    }
-    hilo.start();
-}
-
-class MyAsyncTask : AsyncTask<Unit, Int, String>() {
-
-    override fun onPreExecute() {
-        super.onPreExecute()
-        println("AsyncTask started")
-    }
-
-    override fun doInBackground(vararg params: Unit?): String {
-        for (i in 1..10) {
-            SystemClock.sleep(500)
-            publishProgress(i * 10)
-        }
-        return "Task completed"
-    }
-
-    override fun onProgressUpdate(vararg values: Int?) {
-        super.onProgressUpdate(*values)
-        println("Progress: ${values[0]}%")
-    }
-
-    override fun onPostExecute(result: String?) {
-        super.onPostExecute(result)
-        println(result)
-    }
-
-    override fun onCancelled(result: String?) {
-        super.onCancelled(result)
-    }
-}
-
-class SharedResource {
-    private val lock = Any() // Use any object as a lock
-
-    fun doSomething() {
-        synchronized(lock) {
-            // Only one thread can execute this block at a time
-            println("Thread-safe operation")
-        }
     }
 }
